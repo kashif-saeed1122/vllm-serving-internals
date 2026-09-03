@@ -124,15 +124,71 @@ Week 1 prefix-cache hit-rate observation)*
 ---
 
 ## Sweep Results (concurrency 1 / 2 / 5 / 10 / 20)
-*(to be filled in after Step 4 pod session)*
 
-| Concurrency | TTFT p50 | TTFT p95 | TTFT p99 | ITL p50 | ITL p95 | ITL p99 | Req/s | Tok/s |
+Config held fixed across all runs: `--random-input-len 512 --random-output-len 256
+--ignore-eos --num-prompts 100 --request-rate inf --seed 42`. Only
+`--max-concurrency` varies.
+
+| Concurrency | TTFT mean | TTFT p50 | TTFT p95 | TTFT p99 | ITL mean | TPOT mean | Req/s | Tok/s (output) |
 |---|---|---|---|---|---|---|---|---|
-| 1 | | | | | | | | |
-| 2 | | | | | | | | |
-| 5 | | | | | | | | |
-| 10 | | | | | | | | |
-| 20 | | | | | | | | |
+| 1  | 98.41 ms | 100.47 ms | 103.13 ms | 103.86 ms | 8.826 ms | 8.861 ms | 0.424 | 108.55 |
+| 2  | 24.36 ms | 24.40 ms  | 26.51 ms  | 27.47 ms  | 8.846 ms | 8.881 ms | 0.874 | 223.65 |
+| 5  | 32.10 ms | 30.13 ms  | 41.93 ms  | 44.59 ms  | 9.092 ms | 9.128 ms | 2.117 | 542.04 |
+| 10 | 44.21 ms | 41.47 ms  | 60.32 ms  | 66.18 ms  | 10.017 ms| 10.056 ms| 3.826 | 979.55 |
+| 20 | 71.39 ms | 72.64 ms  | 108.45 ms | 128.50 ms| 12.033 ms| 12.080 ms| 6.333 | 1621.29|
+
+### Findings
+
+**1. Throughput scaling bends past concurrency ~5.**
+Throughput-gain per unit of concurrency-gain: 1→2 is 2.06× (super-linear/noise),
+2→5 is 2.42× (near-linear), 5→10 drops to 1.81×, 10→20 drops further to 1.66×.
+Confirms Week 1's "5.7x throughput, no slowdown" finding was a true but
+partial picture — the near-free scaling holds at low concurrency and
+visibly degrades as concurrency climbs toward 20. This GPU/model/config
+starts running out of easy headroom somewhere between concurrency 5 and 10.
+
+**2. TTFT rises cleanly with concurrency — with concurrency=1 excluded.**
+2→5→10→20 shows a clean monotonic increase (24 → 32 → 44 → 71ms mean),
+consistent with more requests competing for prefill/scheduling slots as
+load rises.
+
+**3. Decode-step cost (ITL/TPOT) grows only mildly.**
+8.8ms → 12.0ms mean ITL across a 20x increase in concurrency (36% growth)
+while throughput grew ~15x over the same range. This is continuous
+batching's mechanism made numerically visible: decode is memory-bandwidth-
+bound, so batching more sequences into one step barely increases that
+step's wall-clock time — tokens-per-step scales far faster than
+time-per-step.
+
+**4. Connecting thread:** aggregate throughput and per-token decode cost
+both stay favorable through this whole range, but TTFT is the
+user-facing metric that actually degrades — a request at concurrency=20
+waits ~3x longer to see its first token than one at concurrency=2, even
+though the system as a whole is far more efficient in aggregate.
+Candidate framing for Month 3.
+
+### Open questions (bound-your-depth — not resolved this week)
+
+**A. `max_concurrent_requests` in the result JSON is exactly 2x the
+configured `--max-concurrency`, at every level (1→2, 2→4, 5→10, 10→20,
+20→40).** Too consistent to be scheduling jitter. Not yet traced to a
+root cause in the tool's source — flagged for the Month 2 source dive
+(this is literally request-lifecycle tracing, just pulled forward).
+Other users online report the same exact 2x pattern independently, so
+this looks like a real, versioned behavior of `vllm bench serve`, not
+something specific to this setup.
+
+**B. Concurrency=1's TTFT (98ms) is the highest of the whole sweep,
+breaking the otherwise clean monotonic trend from concurrency=2 onward.**
+Distribution is tight (std ≈13ms, all percentiles clustered 100-104ms) —
+not just 1-2 slow outliers, the whole run ran consistently slow.
+Leading hypothesis: one-time warm-up cost (CUDA graph capture for an
+unseen batch shape, or GPU clock ramp-up from an idle power state)
+specific to concurrency=1 being the first full 100-request run in the
+sweep. Not confirmed. **Fix for Week 3:** add a small unrecorded warm-up
+burst before the sweep starts, and consider re-running concurrency=1 a
+second time at the end of the sweep to check whether the anomaly
+disappears on a second pass.
 
 **Memory ceiling observations (concurrency=20 run):**
 - KV cache usage metric name found in `/metrics`:
