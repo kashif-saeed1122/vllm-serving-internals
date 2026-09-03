@@ -17,7 +17,7 @@ for c in 1 2 5 10 20; do
     --max-concurrency "$c" \
     --request-rate inf \
     --percentile-metrics ttft,tpot,itl \
-    --percentiles 50,95,99 \
+    --metric-percentiles 50,95,99 \
     --seed 42 \
     --save-result \
     --result-dir results/week2 \
