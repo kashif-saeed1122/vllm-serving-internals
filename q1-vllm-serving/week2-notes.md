@@ -5,6 +5,37 @@ Capture TTFT, ITL, throughput, and real percentiles across a concurrency sweep.
 
 ---
 
+## ⚠ Carried forward to Week 3 pod session (grab these before/alongside Week 3's own work — don't spin up a pod just for this)
+
+- [ ] **KV-cache usage gauge from `/metrics`**, captured during a high-concurrency
+      run (concurrency 20 or whatever Week 3 uses):
+      ```bash
+      curl -s http://localhost:8000/metrics | grep -i cache
+      ```
+      Note the exact gauge name AND its peak value. Fill into "Memory ceiling
+      observations" below once captured.
+
+- [ ] **Re-run the nvidia-smi watch, but read the columns separately this time**
+      — last session's 35% / 37-38% reading wasn't confirmed as memory% or
+      compute-util%:
+      ```bash
+      watch -n1 nvidia-smi --query-gpu=memory.used,memory.total,utilization.gpu --format=csv
+      ```
+      Write down memory% and compute-util% as two separate numbers, labeled.
+      If compute-util% is the one that sat ~35% and spiked toward 100%, that
+      confirms the prefill(compute-bound)/decode(memory-bound) split from
+      this week's PagedAttention notes — worth stating plainly if so.
+
+- [ ] **One-line SECURITY-NOTES.md entry** — does prefix-cache hit-rate
+      visibility (via `/metrics`) change at different concurrency levels?
+      Opportunistic only, not a dedicated investigation.
+
+Once any of the above is done, update the "Memory ceiling observations"
+entry further down in this same file with the real numbers — don't leave
+it duplicated in two places.
+
+---
+
 ## Metrics Glossary
 
 **TTFT** — Time To First Token
@@ -119,7 +150,44 @@ Week 1 prefix-cache hit-rate observation)*
 ---
 
 ## Weekend Teardown: TTFT/ITL timing in vllm bench serve
-*(to be filled in)*
+
+Source read: `calculate_metrics()` in `vllm/benchmarks/serve.py`.
+
+**Correction to my own earlier assumption:** this function does NOT stamp
+TTFT/ITL. It's a downstream aggregator, not the stamping site. It reads
+`outputs[i].ttft` and `outputs[i].itl` — values already recorded per-request,
+live, during the actual streaming call (in a different function, the async
+request sender — not yet read). What `calculate_metrics` actually does:
+pools every request's already-recorded ttft into one list
+(`ttfts.append(...)`) and concatenates every request's already-built itl
+list into one big list (`itls += outputs[i].itl`), across all 100 requests,
+so percentiles can be computed over the full population.
+
+**`max_concurrent_requests` mystery — RESOLVED from source, not just observed:**
+
+```python
+request_start_second = int(output.start_time - min_start_time)
+request_end_second = int((output.start_time + output.latency) - min_start_time)
+for second in range(request_start_second, request_end_second + 1):
+    concurrent_requests_per_second[second] += 1
+```
+
+This buckets each request into whole integer seconds (`int()` truncation)
+and increments a counter for every second from start-bucket to end-bucket,
+**inclusive of both ends**. Because every request in this sweep is
+identical length (256 output tokens, `--ignore-eos`), at `--max-concurrency=N`
+with `--request-rate inf`, a whole wave of N requests finishes together and
+the next wave of N starts together — landing in the *same* integer-second
+bucket. That shared bucket gets +N (departing wave) and +N (arriving wave)
+= 2N, even though no more than N requests were ever truly active at once.
+This is a real artifact of (a) coarse integer-second bucketing and (b) all
+requests being equal length so waves synchronize almost perfectly at
+handoff boundaries — confirmed by cross-checking against measured run
+duration, which matched the *configured* concurrency, not the doubled
+value (see Finding below, now moved out of Open Questions).
+
+**Testable prediction for Week 3:** once prompt/output lengths vary, waves
+should desync, and this exact 2x pattern should weaken or disappear.
 
 ---
 
@@ -167,18 +235,20 @@ waits ~3x longer to see its first token than one at concurrency=2, even
 though the system as a whole is far more efficient in aggregate.
 Candidate framing for Month 3.
 
+**5. `max_concurrent_requests` field is a benchmark-tool measurement
+artifact, RESOLVED via source (see Weekend Teardown above).** It exactly
+doubles the configured `--max-concurrency` at every level because of how
+`calculate_metrics()` buckets request start/end times into whole integer
+seconds — a wave-handoff boundary gets double-counted when all requests
+are equal length. Verified independently by cross-checking measured run
+duration against a "waves" model using the *configured* concurrency (not
+the doubled value) — matched actual duration within 0.2-0.4% at every
+level. Actual server-side concurrency = configured value. The field
+itself is unreliable for this equal-length-request scenario.
+
 ### Open questions (bound-your-depth — not resolved this week)
 
-**A. `max_concurrent_requests` in the result JSON is exactly 2x the
-configured `--max-concurrency`, at every level (1→2, 2→4, 5→10, 10→20,
-20→40).** Too consistent to be scheduling jitter. Not yet traced to a
-root cause in the tool's source — flagged for the Month 2 source dive
-(this is literally request-lifecycle tracing, just pulled forward).
-Other users online report the same exact 2x pattern independently, so
-this looks like a real, versioned behavior of `vllm bench serve`, not
-something specific to this setup.
-
-**B. Concurrency=1's TTFT (98ms) is the highest of the whole sweep,
+**A. Concurrency=1's TTFT (98ms) is the highest of the whole sweep,
 breaking the otherwise clean monotonic trend from concurrency=2 onward.**
 Distribution is tight (std ≈13ms, all percentiles clustered 100-104ms) —
 not just 1-2 slow outliers, the whole run ran consistently slow.
@@ -191,6 +261,16 @@ second time at the end of the sweep to check whether the anomaly
 disappears on a second pass.
 
 **Memory ceiling observations (concurrency=20 run):**
-- KV cache usage metric name found in `/metrics`:
-- Peak value observed:
-- VRAM used vs. total:
+- KV cache usage metric name found in `/metrics`: NOT CAPTURED this session
+  — pane 3's `/metrics | grep cache` step was missed/incomplete. Open for
+  next session, or explicitly note as skipped in the final report (60%
+  completion is expected per the plan).
+- nvidia-smi observation: saw ~35% baseline, spiking to 37-38%, with brief
+  spikes toward 100% — TODO confirm which column (`memory.used` % vs.
+  `utilization.gpu` %) these numbers came from before writing a final
+  interpretation. If this is GPU compute utilization: strong candidate
+  confirmation of the prefill (compute-bound, spikes to 100%) vs. decode
+  (memory-bandwidth-bound, GPU compute mostly idle at ~35%) split from
+  this week's PagedAttention notes. If this is VRAM memory %, it conflicts
+  with Week 1's ~87% idle-reservation finding and needs a second look.
+- VRAM used vs. total: pending same clarification above.
