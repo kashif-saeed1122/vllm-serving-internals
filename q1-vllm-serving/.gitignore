@@ -1,2 +1,5 @@
-﻿
+# Secrets — pod endpoint / API key
 .env
+
+# Local planning docs — working notes, not part of the public deliverable
+week3-plan.md
