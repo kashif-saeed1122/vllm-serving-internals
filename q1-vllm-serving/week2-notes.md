@@ -229,6 +229,241 @@ iteration-level scheduling and whose KV reservation scheme is the very
 problem PagedAttention was written to fix) and to Month 3, where a full
 block pool will be triggered on purpose.
 
+### 5. My own understanding, written from memory then cross-checked
+
+Written before re-opening the paper, then checked against it. Kept in my own
+words with the corrections marked, so I can see where my mental model was off.
+
+*(Section numbers below are my best read of the paper's structure — verify them
+when re-opening. Paper: https://arxiv.org/abs/2309.06180)*
+
+---
+
+**① Block size**
+
+> **What I wrote:** KV block have fixed size of 16 in which it performs better,
+> and it is better to tweak this param from 16 to 128 — too large a number
+> yields the mem frag issue, and too small param I do not remember. So for best
+> performing it must be 16.
+
+**Verdict: mostly right, one thing backwards, one gap filled.**
+
+- ✅ **16 is correct** and it is vLLM's default. The paper's ablation
+  (§7.2, "impact of block size") sweeps block sizes and lands on 16.
+- ✅ **"too large → memory fragmentation" is right.** Bigger blocks mean a
+  bigger partially-filled last block per sequence, so internal fragmentation
+  grows.
+- ❌ **"it is better to tweak this param from 16 to 128" is backwards.** 16 →
+  128 makes things *worse*, not better. 16 to 128 is the *range the paper
+  tested*, not a recommended direction to move in. The conclusion is that 16 is
+  the sweet spot and you should leave it alone.
+- 🔵 **The "too small" answer I could not remember: GPU under-utilisation.**
+  With very small blocks the attention kernel cannot exploit GPU parallelism
+  efficiently when reading KV — too many separate block-table lookups, poor
+  memory coalescing, more indirection per token of useful work. So the kernel
+  gets slower.
+- 🔵 **There is a SECOND reason too-large is bad that I missed: sharing drops.**
+  Sharing is block-granular (see §2 above), so two sequences can only share
+  whole blocks. With `block_size=128`, a 100-token shared prefix shares
+  **nothing at all** — it does not fill even one block. With `block_size=16` the
+  same prefix shares 6 blocks. Bigger blocks destroy exactly the mechanism the
+  paper is built around.
+
+**So the trade-off is three-sided, not two-sided:**
+
+```
+block size too SMALL  ->  GPU/kernel inefficiency (too much indirection)
+block size too LARGE  ->  internal fragmentation  AND  less sharing
+                 16   ->  large enough for the kernel, small enough for both
+```
+
+*Connects to my own Week 3 numbers:* at `block_size=16` and 56 KiB/token, one
+block = 896 KiB, and a 7,168-token sequence needs 448 blocks with at most 15
+token-slots wasted. That is the arithmetic in §1 above, and it is only that good
+*because* the block is small.
+
+---
+
+**② The system architecture**
+
+> **What I wrote:** They have infra in which each GPU worker interacts with the
+> scheduler, and each GPU worker have KV cache, and KV cache is managed by the
+> KV manager which incorporates via the scheduler with the GPU workers. And it
+> maintains the block tables that maintains the CPU block allocator and GPU
+> block allocator.
+
+**Verdict: the pieces are all correct; one relationship is inverted.**
+
+- ✅ **Centralised scheduler ↔ distributed GPU workers** — correct (§4.6,
+  "Distributed Execution", and the system-overview figure in §5).
+- ✅ **Each GPU worker holds KV cache** — correct, it holds *its shard* of the
+  physical blocks.
+- ✅ **The KV cache manager lives in the scheduler and drives the workers** —
+  correct. The scheduler sends control messages (including block tables) to the
+  workers each step.
+- ❌ **Inverted: "block tables that maintain the CPU/GPU block allocator."**
+  It is the other way round. The **KV cache manager owns the two allocators**
+  (GPU block allocator for device memory, CPU block allocator for swap space),
+  and it *separately* maintains **one block table per sequence** — the
+  logical→physical mapping from §1 above. Block tables are per-sequence
+  *mappings*; allocators are the pool *bookkeepers*. Neither maintains the
+  other; the manager maintains both.
+
+```
+              Scheduler
+                  |
+           KV cache manager
+             /            \
+      block tables      block allocators
+      (one per           - GPU block allocator
+       sequence:         - CPU block allocator  (swap space)
+       logical ->
+       physical)
+                  |
+        broadcast to workers
+         /        |        \
+    worker 0   worker 1   worker 2
+    (its KV    (its KV    (its KV
+     shard)     shard)     shard)
+```
+
+- 🔵 **One thing I missed, and it is the neat part:** all workers use the
+  **same** block table. That works because tensor parallelism partitions the
+  *attention heads*, not the *tokens* — every worker holds the same token
+  positions, just different heads of them. So physical block N means the same
+  logical position on every worker, and the scheduler can compute the mapping
+  **once** and broadcast it, instead of tracking memory per worker.
+
+---
+
+**③ Sharing**
+
+> **What I wrote:** Also KV block shares when they have same prompt, few-shot
+> examples.
+
+**Verdict: correct, but incomplete — it is the smaller of the paper's two
+sharing cases.**
+
+- ✅ **Shared prefix across different requests** — correct, and few-shot
+  examples is literally one of the paper's own examples (a system prompt or task
+  description plus few-shot examples, shared by every request hitting that
+  endpoint). Evaluated in §6.3.
+- 🔵 **The case I left out: parallel sampling and beam search** (§4.4, §6.2) —
+  *one* prompt producing *many* completions. This is arguably the paper's
+  headline sharing scenario, because it is the one that **needs copy-on-write**:
+  the completions share the prompt's blocks, then diverge, and the block they
+  diverge inside must be copied before either can write to it. Shared *prefixes*
+  across separate requests mostly stay read-only; parallel sampling is where the
+  refcount + CoW machinery from §2 above actually earns its complexity.
+
+*Connects to my own Week 1 number:* the 34.4% → 53.9% → 58.6% hit-rate trend is
+the **shared-prefix** case, measured on real hardware. I have never exercised
+the parallel-sampling case — `n=1` on every request all quarter.
+
+---
+
+**④ FCFS vs eviction — the bit I said I did not understand**
+
+> **What I wrote:** Moreover they claim they serve the request FCFS, but they
+> evict blocks which I did not understand, and put that in the CPU for later
+> recall.
+
+**Verdict: both halves right. And the confusion has a clean answer.**
+
+- ✅ **FCFS is correct** (§4.5, "Scheduling and Preemption"). The paper chooses
+  first-come-first-serve explicitly for fairness and to prevent starvation.
+- ✅ **"put that in the CPU for later recall" is correct** — that is **swapping**.
+  Evicted blocks are copied to CPU memory and swapped back when GPU space frees.
+
+**Why FCFS and eviction are not a contradiction — the two rules I was missing:**
+
+1. **Eviction is all-or-nothing, at *sequence* granularity.** You cannot evict
+   half a sequence's blocks, because a sequence needs its *entire* KV history to
+   produce the next token. So all of a victim sequence's blocks go together.
+2. **The victim is the most-recently-arrived sequence, not the oldest.**
+   Preemption runs in **reverse order of arrival**.
+
+Rule 2 is the answer to my confusion. **Evicting newest-first is what
+*preserves* FCFS**, rather than violating it: the earliest-arrived requests are
+the last to ever be preempted, so they still finish first. FCFS describes the
+*ordering guarantee*; eviction is the mechanism for surviving memory pressure
+*without breaking that ordering*.
+
+- 🔵 **And I missed the second recovery mechanism entirely: recomputation.**
+  Instead of copying blocks to CPU and back, just **throw them away and
+  recompute the KV from the token IDs** when the sequence is rescheduled. Which
+  sounds wasteful but often is not — recomputing runs as a *single prefill pass*
+  over the whole sequence, which is far more efficient than the token-by-token
+  decode that originally produced that KV.
+
+```
+KV cache full -> pick victim (LATEST arrival) -> evict ALL its blocks
+                                                     |
+                            +------------------------+------------------------+
+                            |                                                 |
+                     SWAPPING                                        RECOMPUTATION
+              copy blocks to CPU RAM,                        discard blocks; on reschedule
+              copy back when space frees                     re-run prefill from token IDs
+              (costs PCIe bandwidth)                         (costs one prefill, no transfer)
+```
+
+§7.3 compares the two: **recomputation wins at small block sizes** (moving many
+tiny blocks over PCIe is inefficient), **swapping wins at large block sizes**.
+Since 16 is small, recomputation is the sensible default — and vLLM v1 does
+default to recompute.
+
+*Connects forward:* this is the preemption path. `num_preemptions_total` in
+`/metrics` counts it, Week 3 watches for it as the honest KV-exhaustion signal,
+and Week 10 triggers it on purpose.
+
+---
+
+**⑤ The drawback**
+
+> **What I wrote:** Moreover the drawback I understood from that paper is that
+> they have greater kernel overhead which contributes little in case of compute
+> time.
+
+**Verdict: correct. This is the sharpest of my five points.**
+
+The paper measures it directly (§7.1, kernel microbenchmark): the PagedAttention
+attention kernel is roughly **20–26% slower** than a highly-optimised
+contiguous-memory attention kernel (they compare against FasterTransformer).
+*(Verify the exact figure — quoting from memory.)*
+
+**Why slower:** the block-table indirection is not free — an extra memory read
+to fetch the mapping, extra branches, and handling variable-length sequences
+instead of a fixed contiguous layout.
+
+**Why it does not matter, which is the part I got right:** attention is only one
+part of the forward pass. The Linear/GEMM layers dominate, and they are
+untouched by PagedAttention. So a 20–26% penalty on a minority of the compute
+is a small end-to-end cost.
+
+**The trade I should state explicitly:** you pay a few percent of *per-token*
+speed and get back the ability to run a **far larger batch**, because memory is
+no longer wasted on reservation. That is not close to break-even — it is the
+whole thesis of the paper, and it is visible in my own Week 2 data: **ITL rose
+only 36% while output throughput rose ~15×.** A few percent of kernel overhead
+is invisible next to a 15× throughput gain.
+
+---
+
+### Scorecard
+
+| # | Claim | Verdict |
+|---|---|---|
+| ① | Block size 16 is the sweet spot; too large → fragmentation | Right, but "tweak 16 → 128" is backwards. Missing: too-small → **kernel inefficiency**; too-large also → **less sharing** |
+| ② | Scheduler ↔ workers, KV manager, block tables, CPU/GPU allocators | All pieces right; **allocators are owned by the manager, not by the block tables**. Missing: one block table serves all workers (TP shards heads, not tokens) |
+| ③ | Blocks share on same prompt / few-shot examples | Right. Missing: **parallel sampling / beam search** — the case that needs copy-on-write |
+| ④ | FCFS, yet blocks get evicted to CPU | Both right. The gap: eviction is **all-or-nothing per sequence** and takes the **newest** first, which is *why* FCFS survives. Missing: **recomputation** as the other (usually better) option |
+| ⑤ | Greater kernel overhead, small share of compute time | **Right.** ~20–26% on the attention kernel only; dominated by the batch-size win |
+
+**Pattern in my own errors:** four of five were directionally right, and every
+miss was the *second* reason for something rather than the first. Worth noting
+for how I read the next paper — when the paper gives a trade-off, look for
+whether each side has more than one cause.
+
 ---
 
 ## Weekend Teardown: TTFT/ITL timing in vllm bench serve
