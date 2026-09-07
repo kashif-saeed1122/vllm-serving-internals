@@ -7,7 +7,7 @@
   across requests — the underlying mechanism a timing side-channel attack
   would exploit. Still observation-only; no timing-based inference attempted.
 
-  - [Week 2] [Prefix caching — NOT measured, method gap identified] — The Week 2
+ - [Week 2] [Prefix caching — NOT measured, method gap identified] — The Week 2
   concurrency sweep (1/2/5/10/20, 512-in/256-out, 100 prompts each) produced no
   prefix-cache data, because `/metrics` was never sampled during the runs. The
   sweep used `vllm bench serve --dataset-name random`, which generates unique
