@@ -480,6 +480,85 @@ pools every request's already-recorded ttft into one list
 list into one big list (`itls += outputs[i].itl`), across all 100 requests,
 so percentiles can be computed over the full population.
 
+### TTFT/ITL/E2EL stamping site — RESOLVED (Week 3, Day 3)
+
+**Source read:** `async_request_openai_chat_completions()` in
+`vllm/benchmarks/lib/endpoint_request_func.py` — the actual async request
+sender referenced above as "not yet read." This is the backend used by this
+sweep (`--backend openai-chat`).
+
+**Q1 — Which clock?**
+`time.perf_counter()`, used everywhere in the function — never `time.time()`.
+This is the correct choice: it's monotonic (guaranteed to only ever count
+upward, immune to NTP corrections or system-clock adjustments), unlike
+`time.time()`, which can jump backward mid-run and produce negative
+durations. No issue here.
+
+**Q2 — Where is the start timestamp taken relative to the HTTP request?**
+```python
+st = time.perf_counter()          # <- stamped here
+...
+async with session.post(url=api_url, json=payload, headers=headers) as response:
+```
+`st` is taken **before** `session.post()` is called. So TTFT (and E2EL)
+include connection setup / request dispatch time on the client side, not
+just server-side prefill compute. Minor, but worth stating as a caveat
+rather than assuming TTFT is pure server-side work.
+
+**Q3 — What exactly trips the "first token arrived" stamp?**
+```python
+if choices := data.get("choices"):
+    content = choices[0]["delta"].get("content")
+    if ttft == 0.0:
+        ttft = timestamp - st
+        output.ttft = ttft
+    else:
+        output.itl.append(timestamp - most_recent_timestamp)
+```
+The check only tests whether a `choices` list is present and non-empty — it
+never checks whether `content` is actually non-empty text. OpenAI-compatible
+streams commonly open with a role-only announcement chunk with no content,
+e.g. `{"choices": [{"delta": {"role": "assistant"}}]}`. If vLLM's stream
+opens the same way, TTFT is stamped on **that** chunk, not on the first
+chunk carrying real text. **Effect: TTFT is really "time to first chunk,"
+not strictly "time to first token."** This should apply uniformly across all
+runs in the sweep, so it should not bias comparisons *between* concurrency
+levels, but it means the absolute TTFT numbers slightly understate true
+time-to-first-real-token. Stating as a caveat rather than re-running —
+verifying vLLM's exact first-chunk shape is a Week 3+ task if it ever
+matters for an absolute (not comparative) claim.
+
+**Q4 — Is `itl` appended once per chunk or once per token?**
+```python
+else:
+    output.itl.append(timestamp - most_recent_timestamp)
+```
+Once per streamed chunk (SSE message), not verified per-token. In the
+common case one decode step = one token = one chunk, so chunk-latency and
+token-latency coincide — but the code has no check enforcing that. **Treat
+ITL as inter-chunk latency**, not inter-token latency, unless vLLM's
+streaming behavior for this config is separately confirmed to emit exactly
+one token per chunk.
+
+**Q5 — What does `latency` (E2EL) span?**
+```python
+output.latency = most_recent_timestamp - st
+```
+`most_recent_timestamp` updates on every successfully-parsed chunk carrying
+either `choices` or `usage`. Because `stream_options.include_usage=True` is
+set in the payload, vLLM sends one extra usage-stats chunk after the last
+content chunk — and `most_recent_timestamp` picks that up too. So E2EL spans
+from just-before-request-sent to the **final usage chunk**, not to the
+literal `[DONE]` SSE marker (which is explicitly skipped and never
+timestamped: `if chunk != "[DONE]":` guards the whole block).
+
+**Bottom line:** clock choice is sound; TTFT/E2EL both include a small
+amount of client-side overhead by design (start stamped pre-`POST`); TTFT
+may be measuring "first chunk" rather than "first token" on a role-only
+opening chunk; ITL is inter-chunk, not confirmed inter-token. None of these
+invalidate the Week 2 findings — they were consistent across every run — but
+they're the right caveats for the final report's methodology section.
+
 **`max_concurrent_requests` mystery — RESOLVED from source, not just observed:**
 
 ```python
