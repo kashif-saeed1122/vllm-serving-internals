@@ -243,21 +243,17 @@ when re-opening. Paper: https://arxiv.org/abs/2309.06180)*
 
 > **What I wrote:** KV block have fixed size of 16 in which it performs better,
 > and it is better to tweak this param from 16 to 128 — too large a number
-> yields the mem frag issue, and too small param I do not remember. So for best
+> yields the mem frag issue, and too small param GPU under utilization. So for best
 > performing it must be 16.
 
 **Verdict: mostly right, one thing backwards, one gap filled.**
 
 - ✅ **16 is correct** and it is vLLM's default. The paper's ablation
   (§7.2, "impact of block size") sweeps block sizes and lands on 16.
-- ✅ **"too large → memory fragmentation" is right.** Bigger blocks mean a
+- ✅ **"too large → memory fragmentation".** Bigger blocks mean a
   bigger partially-filled last block per sequence, so internal fragmentation
   grows.
-- ❌ **"it is better to tweak this param from 16 to 128" is backwards.** 16 →
-  128 makes things *worse*, not better. 16 to 128 is the *range the paper
-  tested*, not a recommended direction to move in. The conclusion is that 16 is
-  the sweet spot and you should leave it alone.
-- 🔵 **The "too small" answer I could not remember: GPU under-utilisation.**
+- 🔵 **The "too small": GPU under-utilisation.**
   With very small blocks the attention kernel cannot exploit GPU parallelism
   efficiently when reading KV — too many separate block-table lookups, poor
   memory coalescing, more indirection per token of useful work. So the kernel
