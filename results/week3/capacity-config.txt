@@ -1,0 +1,1 @@
+APIServer pid=51) INFO 09-09 12:07:22 [api_utils.py:272] non-default args: {'model_tag': 'Qwen/Qwen2.5-7B-Instruct-AWQ', 'model': 'Qwen/Qwen2.5-7B-Instruct-AWQ', 'max_model_len': 8192, 'quantization': 'awq', 'gpu_memory_utilization': 0.9}

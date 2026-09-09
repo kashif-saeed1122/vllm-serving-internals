@@ -1,0 +1,30 @@
+{
+    "object": "list",
+    "data": [
+        {
+            "id": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+            "object": "model",
+            "created": 1788956416,
+            "owned_by": "vllm",
+            "root": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+            "parent": null,
+            "max_model_len": 8192,
+            "permission": [
+                {
+                    "id": "modelperm-b300c8de0fc2af8b",
+                    "object": "model_permission",
+                    "created": 1788956416,
+                    "allow_create_engine": false,
+                    "allow_sampling": true,
+                    "allow_logprobs": true,
+                    "allow_search_indices": false,
+                    "allow_view": true,
+                    "allow_fine_tuning": false,
+                    "organization": "*",
+                    "group": null,
+                    "is_blocking": false
+                }
+            ]
+        }
+    ]
+}

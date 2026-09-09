@@ -1,0 +1,66 @@
+# HELP vllm:cache_config_info Information of the LLMEngine CacheConfig
+# HELP vllm:e2e_request_latency_seconds Histogram of e2e request latency in seconds.
+# HELP vllm:e2e_request_latency_seconds_created Histogram of e2e request latency in seconds.
+# HELP vllm:engine_sleep_state Engine sleep state; awake = 0 means engine is sleeping; awake = 1 means engine is awake; weights_offloaded = 1 means sleep level 1; discard_all = 1 means sleep level 2.
+# HELP vllm:estimated_flops_per_gpu_created Estimated number of floating point operations per GPU (for Model Flops Utilization calculations).
+# HELP vllm:estimated_flops_per_gpu_total Estimated number of floating point operations per GPU (for Model Flops Utilization calculations).
+# HELP vllm:estimated_read_bytes_per_gpu_created Estimated number of bytes read from memory per GPU (for Model Flops Utilization calculations).
+# HELP vllm:estimated_read_bytes_per_gpu_total Estimated number of bytes read from memory per GPU (for Model Flops Utilization calculations).
+# HELP vllm:estimated_write_bytes_per_gpu_created Estimated number of bytes written to memory per GPU (for Model Flops Utilization calculations).
+# HELP vllm:estimated_write_bytes_per_gpu_total Estimated number of bytes written to memory per GPU (for Model Flops Utilization calculations).
+# HELP vllm:external_prefix_cache_hits_created External prefix cache hits from KV connector cross-instance cache sharing, in terms of number of cached tokens.
+# HELP vllm:external_prefix_cache_hits_total External prefix cache hits from KV connector cross-instance cache sharing, in terms of number of cached tokens.
+# HELP vllm:external_prefix_cache_queries_created External prefix cache queries from KV connector cross-instance cache sharing, in terms of number of queried tokens.
+# HELP vllm:external_prefix_cache_queries_total External prefix cache queries from KV connector cross-instance cache sharing, in terms of number of queried tokens.
+# HELP vllm:generation_tokens_created Number of generation tokens processed.
+# HELP vllm:generation_tokens_total Number of generation tokens processed.
+# HELP vllm:inter_token_latency_seconds Histogram of inter-token latency in seconds.
+# HELP vllm:inter_token_latency_seconds_created Histogram of inter-token latency in seconds.
+# HELP vllm:iteration_tokens_total Histogram of number of tokens per engine_step.
+# HELP vllm:iteration_tokens_total_created Histogram of number of tokens per engine_step.
+# HELP vllm:kv_cache_usage_perc KV-cache usage. 1 means 100 percent usage.
+# HELP vllm:mm_cache_hits_created Multi-modal cache hits, in terms of number of cached items.
+# HELP vllm:mm_cache_hits_total Multi-modal cache hits, in terms of number of cached items.
+# HELP vllm:mm_cache_queries_created Multi-modal cache queries, in terms of number of queried items.
+# HELP vllm:mm_cache_queries_total Multi-modal cache queries, in terms of number of queried items.
+# HELP vllm:num_preemptions_created Cumulative number of preemption from the engine.
+# HELP vllm:num_preemptions_total Cumulative number of preemption from the engine.
+# HELP vllm:num_requests_running Number of requests in model execution batches.
+# HELP vllm:num_requests_waiting Number of requests waiting to be processed.
+# HELP vllm:num_requests_waiting_by_reason Number of waiting requests by reason. Reason labels: 'capacity' = waiting for scheduling capacity; 'deferred' = deferred by transient constraints (LoRA budget, KV transfer, blocked status). Sum of all reasons equals vllm:num_requests_waiting.
+# HELP vllm:prefix_cache_hits_created Prefix cache hits, in terms of number of cached tokens.
+# HELP vllm:prefix_cache_hits_total Prefix cache hits, in terms of number of cached tokens.
+# HELP vllm:prefix_cache_queries_created Prefix cache queries, in terms of number of queried tokens.
+# HELP vllm:prefix_cache_queries_total Prefix cache queries, in terms of number of queried tokens.
+# HELP vllm:prompt_tokens_by_source_created Number of prompt tokens by source.
+# HELP vllm:prompt_tokens_by_source_total Number of prompt tokens by source.
+# HELP vllm:prompt_tokens_cached_created Number of cached prompt tokens (local + external).
+# HELP vllm:prompt_tokens_cached_total Number of cached prompt tokens (local + external).
+# HELP vllm:prompt_tokens_created Number of prefill tokens processed.
+# HELP vllm:prompt_tokens_total Number of prefill tokens processed.
+# HELP vllm:request_decode_time_seconds Histogram of time spent in DECODE phase for request.
+# HELP vllm:request_decode_time_seconds_created Histogram of time spent in DECODE phase for request.
+# HELP vllm:request_generation_tokens Number of generation tokens processed.
+# HELP vllm:request_generation_tokens_created Number of generation tokens processed.
+# HELP vllm:request_inference_time_seconds Histogram of time spent in RUNNING phase for request.
+# HELP vllm:request_inference_time_seconds_created Histogram of time spent in RUNNING phase for request.
+# HELP vllm:request_max_num_generation_tokens Histogram of maximum number of requested generation tokens.
+# HELP vllm:request_max_num_generation_tokens_created Histogram of maximum number of requested generation tokens.
+# HELP vllm:request_params_max_tokens Histogram of the max_tokens request parameter.
+# HELP vllm:request_params_max_tokens_created Histogram of the max_tokens request parameter.
+# HELP vllm:request_params_n Histogram of the n request parameter.
+# HELP vllm:request_params_n_created Histogram of the n request parameter.
+# HELP vllm:request_prefill_kv_computed_tokens Histogram of new KV tokens computed during prefill (excluding cached tokens).
+# HELP vllm:request_prefill_kv_computed_tokens_created Histogram of new KV tokens computed during prefill (excluding cached tokens).
+# HELP vllm:request_prefill_time_seconds Histogram of time spent in PREFILL phase for request.
+# HELP vllm:request_prefill_time_seconds_created Histogram of time spent in PREFILL phase for request.
+# HELP vllm:request_prompt_tokens Number of prefill tokens processed.
+# HELP vllm:request_prompt_tokens_created Number of prefill tokens processed.
+# HELP vllm:request_queue_time_seconds Histogram of time spent in WAITING phase for request.
+# HELP vllm:request_queue_time_seconds_created Histogram of time spent in WAITING phase for request.
+# HELP vllm:request_success_created Count of successfully processed requests.
+# HELP vllm:request_success_total Count of successfully processed requests.
+# HELP vllm:request_time_per_output_token_seconds Histogram of time_per_output_token_seconds per request.
+# HELP vllm:request_time_per_output_token_seconds_created Histogram of time_per_output_token_seconds per request.
+# HELP vllm:time_to_first_token_seconds Histogram of time to first token in seconds.
+# HELP vllm:time_to_first_token_seconds_created Histogram of time to first token in seconds.
