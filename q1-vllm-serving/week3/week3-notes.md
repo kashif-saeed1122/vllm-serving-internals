@@ -880,60 +880,6 @@ other way — not warm-up inflating conc-1, but cache reuse deflating every othe
 **P4 being wrong is what produced the week's main finding**, which is the argument for
 pre-registering predictions rather than interpreting after the fact.
 
-## Open questions carried into Week 4
-
-**1. Both sweep scripts need per-run seeds.** Highest priority, and it blocks quoting any
-further TTFT number. Both pass `--seed 42` with fixed lengths to every run, guaranteeing
-identical prompts and cache reuse from the second run on. Options: vary the seed per run
-(each run cold, runs isolated), or keep the seed and report the hit rate beside every TTFT
-so the reader knows what was measured. The second is arguably better science and now costs
-nothing, since the sampler captures it.
-
-**2. Is the Week 2 table salvageable?** ITL/TPOT reproduced to 1.6% and are sound. TTFT is
-contaminated for four of five rows, and there is no Week 2 hit-rate data to quantify by how
-much. Re-measuring with per-run seeds is ~10 minutes of pod time and is the honest option.
-The Month 1 report should not present that TTFT column without either re-measurement or an
-explicit warning.
-
-**3. `max_num_seqs` and `max_num_batched_tokens` are still unknown.** Neither is printed by
-this build nor exposed in `cache_config_info`. Needed to explain the peak `running` of
-exactly 40 in both over-subscribed runs, and to attribute D5's arrival-burst queuing to the
-token budget rather than by elimination. Free to resolve from the local clone.
-
-**4. Why does preemption trigger at 97.5% rather than 100%?** The threshold is tight
-(97.4–97.7% across 25 events), so it is a real boundary and not noise. Candidates: reserved
-headroom for the next prefill chunk, block fragmentation, or a watermark constant. One grep
-in the scheduler.
-
-**5. Why is ceiling c8's hit-rate floor 7.5% rather than the 3.0% seen with short prompts?**
-14,864 hit tokens over 32 requests is 929 blocks — about 29 blocks each, not the single
-template block the short-prompt runs showed. Candidates: a shared prefix in the
-`--dataset-name random` generator at longer lengths, or chunked prefill re-querying the
-cache for portions it has already computed within the same request. The second would mean
-the hit-rate metric partly measures intra-request behaviour at long prompt lengths, which
-would matter for interpreting the 99.8% figure. Worth one look at
-`vllm/benchmarks/datasets.py`.
-
-**6. The model revision is not pinned.** The engine reports `revision=main` and the weights
-were **re-downloaded** this session (`Time spent downloading weights: 15.578986 seconds`,
-`Filesystem type for checkpoints: OVERLAY`) rather than read from the network volume.
-`ENVIRONMENT.md` records revision `b25037543e...` as though enforced; it is not, and it was
-not verified. Either add `--revision` to the serving config or downgrade that line to
-"observed once, unverified".
-
-**7. Sampling was not greedy.** `vllm bench serve` in 0.28.0 no longer defaults to
-`temperature=0`; the server default applied. Throughput is unaffected because
-`--ignore-eos` fixes output length, but generated text is not reproducible. Add
-`--temperature 0` to both sweep scripts.
-
-**8. Axis D was accidentally a prefill-bound experiment.** At 6144-in/1024-out with
-throughput flat from concurrency 8 to 64, this configuration says more about prefill
-bandwidth than about decode scaling. A decode-bound ceiling hunt — short prompts, long
-outputs, so the pool fills from generation rather than from prompts — would test the KV
-ceiling under different pressure and is a better Month 3 design. The 34–35 sequence
-capacity result is unaffected: it rests on block arithmetic and `running`, not on
-throughput.
-
 ## Operational findings
 
 **O1. The container start command is the container's PID 1.** The RunPod template
