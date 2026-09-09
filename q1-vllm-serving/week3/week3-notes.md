@@ -574,44 +574,6 @@ wrong is what produced the week's main finding.**
 
 ---
 
-## 12. Open questions for Week 4
-
-1. **Both sweep scripts need per-run seeds.** Highest priority; blocks quoting
-   any further TTFT number. Both pass `--seed 42` with fixed lengths to every
-   run, guaranteeing identical prompts and cache reuse from run 2 on. Either vary
-   the seed per run, or keep it and report the hit rate beside every TTFT. The
-   second is better science and now costs nothing.
-2. **Is the Week 2 table salvageable?** ITL/TPOT reproduced to 1.6% and are
-   sound. TTFT is contaminated for four of five rows with no Week 2 hit-rate data
-   to quantify it. Re-measuring is ~10 minutes of pod time. The Month 1 report
-   must not present that TTFT column without re-measurement or an explicit
-   warning.
-3. **`max_num_seqs` and `max_num_batched_tokens` still unknown.** Needed to
-   explain the peak `running` of exactly 40, and to attribute D5's queuing to the
-   token budget rather than by elimination. Free from the local clone.
-4. **Why does preemption trigger at 97.5% rather than 100%?** Tight enough
-   (97.4–97.7% across 25 events) to be a real boundary. Candidates: reserved
-   headroom for the next prefill chunk, block fragmentation, a watermark
-   constant. One grep in the scheduler.
-5. **Why is c8's hit-rate floor 7.5% rather than 3.0%?** 14,864 hit tokens over
-   32 requests is 929 blocks, ~29 each, not the single template block. Either the
-   `random` dataset shares a longer prefix at 6144 tokens, or chunked prefill
-   re-queries the cache within the same request. The second would mean the metric
-   partly measures intra-request behaviour at long prompts, which changes how
-   99.8% should be read. One look at `vllm/benchmarks/datasets.py`.
-6. **The model revision is not pinned.** The engine reports `revision=main` and
-   weights were re-downloaded this session (15.58 s, `OVERLAY` filesystem).
-   `ENVIRONMENT.md` records `b25037543e...` as though enforced. Either add
-   `--revision` or downgrade that line to "observed once, unverified".
-7. **Sampling was not greedy.** `vllm bench serve` 0.28.0 no longer defaults to
-   `temperature=0`. Throughput is unaffected because `--ignore-eos` fixes output
-   length, but generated text is not reproducible. Add `--temperature 0`.
-8. **Axis D was accidentally prefill-bound.** A decode-bound ceiling hunt — short
-   prompts, long outputs, so the pool fills from generation — is a better Month 3
-   design. The 34–35 capacity result is unaffected: it rests on block arithmetic
-   and `running`, not throughput.
-
----
 
 ## 13. Operational findings
 
