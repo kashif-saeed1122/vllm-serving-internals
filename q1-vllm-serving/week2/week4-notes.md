@@ -52,3 +52,27 @@ The same seed produces the identical set of prompts every time. In Run 1, the on
 In Run 2, every prompt is byte-identical to its Run 1 counterpart, and Run 1's cache entries are still resident. Of each 541-token prompt, 528 tokens (33 complete 16-token blocks) match exactly and are served from cache; only the trailing 13-token remainder — too short to form a complete block — is recomputed. That gives a hit rate of 97.60%, roughly 33x higher than Run 1's rate.
 
 ITL doesn't depend on prefix caching at all — it measures the per-token cost of decoding, which is fixed compute work the cache can't skip regardless of how much of the prompt was cached. That's why it stayed flat (0.23% change) between the two runs. TTFT, by contrast, is dominated by prefill compute plus network and scheduling overhead — cutting 528 of 541 tokens' worth of compute cuts TTFT substantially (7–8x), even though the fixed overhead keeps it from dropping the full 42x that the raw token-count ratio would suggest.
+
+## Open question — warm-cache hit rate at n=500 far below prediction
+
+Predicted (partial-LRU model): ~62% blended warm rate at n=500, conc 5.
+Measured: 3.53% — barely above the cold baseline (3.15%).
+500 x 50-block full footprint = 25,000 tokens > 15,709 pool, so overflow is
+real, but simple recency-based eviction doesn't explain a rate this low.
+Mechanism unresolved. Deferred — not chased further this week.
+
+## Method note — units mismatch in detailed output
+
+The `ttfts` array in --save-detailed JSON output is in SECONDS.
+All summary fields (mean_ttft_ms, p50_ttft_ms, etc.) are in MILLISECONDS.
+Multiply raw array values by 1000 before computing anything from them.
+Verified: hand-computed percentiles (numpy linear interpolation) match the
+tool's reported p50/p95/p99 exactly once units are corrected.
+
+run        conc  n     mean     p50     p95     p99     min      max     std
+c1_cold      1   100  110.97  107.07  110.08  116.67  103.90   487.79   37.91
+c2_cold      2   500  152.21  148.78  197.14  203.29   70.65   269.60   43.21
+c5_cold      5   500  381.74  450.84  468.12  474.17  108.84   482.14  134.82
+c5_warm      5   500  382.32  450.80  466.47  472.44   69.23   476.00  135.82
+c10_cold    10   500  642.87  787.94  882.42  906.42  120.17   929.51  239.66
+c20_cold    20   500 1006.23 1096.91 1437.59 1739.04  121.13  1845.51  393.02

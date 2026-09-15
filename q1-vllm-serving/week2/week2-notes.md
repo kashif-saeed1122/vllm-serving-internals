@@ -666,3 +666,18 @@ disappears on a second pass.
   this week's PagedAttention notes. If this is VRAM memory %, it conflicts
   with Week 1's ~87% idle-reservation finding and needs a second look.
 - VRAM used vs. total: pending same clarification above.
+
+
+- [x] Memory ceiling — resolved in week3-notes.md section 8: 251,344 tokens,
+      34-35 concurrent sequences, preemption at 97.5% KV occupancy.
+- [x] Prefix caching not measured — resolved in week3-notes.md section 6/7:
+      continuous /metrics sampling closed this gap.
+
+
+
+> **Warning:** TTFT in this table is contaminated for 4 of 5 rows. All five
+> runs shared --seed 42 with identical lengths, so runs 2-5 re-sent prompts
+> run 1 had already cached, and TTFT here measures cache lookups rather than
+> prefill. Only the conc-1 row (first run, genuinely cold) is trustworthy.
+> Corrected, per-run-seeded TTFT curve: see week4-notes.md, Step 5.
+> ITL/TPOT in this table are unaffected — decode work isn't cache-skippable.
