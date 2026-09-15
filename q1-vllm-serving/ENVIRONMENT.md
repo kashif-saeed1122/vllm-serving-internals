@@ -9,3 +9,11 @@ Model revision	b25037543e9394b818fdfca67ab2a00ecc7dd641
 Quantization	AWQ
 Host	RunPod, EU-RO-1
 Storage	Network Volume q1-serving, 25GB, mounted at /workspace
+
+
+KV cache dtype	fp16
+Attention backend	FLASH_ATTN
+Block size	16 tokens
+KV pool	251,344 tokens (15,709 blocks), 13.42 GiB
+
+max_token =8124
