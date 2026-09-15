@@ -45,3 +45,10 @@ ITL would be almost same or negligble higer in case of run 2. becuase decode is 
 | E9 | 0 preemptions | not captured, but consistent with E8's revised occupancy | not captured, consistent |
 | E10 | text identical | identical, verified | hit |
 | E11 | ~1.0–1.3x | 1.183x | hit |
+
+
+The same seed produces the identical set of prompts every time. In Run 1, the only thing shared across the 100 requests is the chat-completion template wrapper, which forms one cacheable 16-token block. Request 1 pays for this block in full; requests 2–100 find it already cached. That gives 99 × 16 = 1,584 hit tokens out of 54,100 queried, a hit rate of 2.93%.
+
+In Run 2, every prompt is byte-identical to its Run 1 counterpart, and Run 1's cache entries are still resident. Of each 541-token prompt, 528 tokens (33 complete 16-token blocks) match exactly and are served from cache; only the trailing 13-token remainder — too short to form a complete block — is recomputed. That gives a hit rate of 97.60%, roughly 33x higher than Run 1's rate.
+
+ITL doesn't depend on prefix caching at all — it measures the per-token cost of decoding, which is fixed compute work the cache can't skip regardless of how much of the prompt was cached. That's why it stayed flat (0.23% change) between the two runs. TTFT, by contrast, is dominated by prefill compute plus network and scheduling overhead — cutting 528 of 541 tokens' worth of compute cuts TTFT substantially (7–8x), even though the fixed overhead keeps it from dropping the full 42x that the raw token-count ratio would suggest.
