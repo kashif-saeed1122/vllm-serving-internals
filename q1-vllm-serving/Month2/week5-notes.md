@@ -118,3 +118,20 @@ clear the budget in one iteration, so they wait — while the KV pool is still
 nearly empty. The KV ceiling (97.5%) and the queue are unrelated, which is
 exactly what I measured. ✅ The paper predicts the *mechanism*; Week 6's scheduler
 code is where I confirm it line by line.
+
+## vllm Repo code reading to find so ans
+
+Read these 2 files 
+vllm/entrypoints/openai/api_server.py: 
+vllm/entrypoints/openai/chat_completion/serving.py: 
+
+I tried to find answers for these questions 
+## Q. What does the server do to the messages list before the engine ever sees it?
+Before seding to engine the message are sent to a funtion called create_chat_completion method that exist nthe api_router.py file which then utlizes the Chat(OpenAIServingChat) Instance which is in serving.py file
+
+## Q. Is the template applied to text, or to token ids?
+The flow is is like this 
+_create_chat_completion -> render_chat_request -> in here it says it returns convo that means it applies on the text not on the token ids.
+
+## Q. What is the streaming function's return type? What does that tell you about how FastAPI sends it?
+It returns the type of AsyncGenerator, the router wraps that generator in StreamingResponse(content=generator, media_type="text/event-stream") — Starlette iterates the generator lazily and writes each yielded string to the response as it's produced, rather than waiting for the whole thing and sending it in one shot.
