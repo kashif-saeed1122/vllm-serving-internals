@@ -135,3 +135,75 @@ _create_chat_completion -> render_chat_request -> in here it says it returns con
 
 ## Q. What is the streaming function's return type? What does that tell you about how FastAPI sends it?
 It returns the type of AsyncGenerator, the router wraps that generator in StreamingResponse(content=generator, media_type="text/event-stream") — Starlette iterates the generator lazily and writes each yielded string to the response as it's produced, rather than waiting for the whole thing and sending it in one shot.
+
+
+### Thursday read code repo
+# 1. step() does three things in order
+Answer (core.py:583-613):
+
+Schedule: self.scheduler.schedule(...) decides which requests run this step, how many tokens each gets, and which KV blocks they use. It returns a SchedulerOutput.
+Execute: self.model_executor.execute_model(scheduler_output, non_block=True) runs the forward pass, and sample_tokens(grammar_output) picks the next token ids.
+Update: self.scheduler.update_from_output(scheduler_output, model_output) appends the new tokens to each request, checks stop conditions, and builds the EngineCoreOutputs that go back to the frontend.
+
+
+# 2. Request states and transitions
+
+The states (request.py:351-367): WAITING, WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR, WAITING_FOR_REMOTE_KVS, WAITING_FOR_STREAMING_REQ, RUNNING, PREEMPTED, then six FINISHED_* states.
+
+The order matters: is_finished() is status > PREEMPTED, which is why the comment says anything after PREEMPTED counts as finished.
+
+ new request
+   │  (structured output?)
+   ├──────────► WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+   │                 │ grammar compiled        │ compile error
+   ▼                 ▼                         ▼
+ WAITING ◄───────────┘                   FINISHED_ERROR
+   │  ▲
+   │  └──────── WAITING_FOR_REMOTE_KVS ◄── (from WAITING or PREEMPTED,
+   │                 │                      async KV load started)
+   │                 └──► back to WAITING, or PREEMPTED if it was preempted before
+   ▼
+ RUNNING ◄──────────── PREEMPTED
+   │   └── out of KV blocks ──► PREEMPTED
+   │
+   ├─ EOS / stop token ───────► FINISHED_STOPPED
+   ├─ max_tokens / max len ───► FINISHED_LENGTH_CAPPED
+   ├─ repetition detected ────► FINISHED_REPETITION
+   ├─ grammar rejects token ──► FINISHED_ERROR
+   └─ (resumable session) ────► WAITING_FOR_STREAMING_REQ ──► WAITING (next chunk)
+                                                          └─► FINISHED_ABORTED (session ends)
+
+ any unfinished state ──► FINISHED_ABORTED   (client abort, shutdown)
+
+# 3. What num_computed_tokens counts, and when it goes down
+Answer: it is how many tokens at the start of the request's sequence (prompt plus output) already have their KV cache entries, so they need no forward pass. Each step the scheduler asks for the rest: num_new_tokens = num_tokens - num_computed_tokens (scheduler.py:932).
+
+It goes up in two places:
+
+At admission: it is set to the prefix-cache hit, local plus external (scheduler.py:881-883, scheduler.py:1136).
+After scheduling: += num_scheduled_token, before the GPU has finished (scheduler.py:1379-1393). The comment there gives the reason: a long prefill can be scheduled again in the very next step.
+So it is optimistic: it means "scheduled to be computed", not "confirmed computed".
+
+It goes down in four cases:
+
+Preemption (the answer the hint wants): the request's blocks are freed, so the counter is reset to 0 (scheduler.py:1352-1356). On resume, the prefix-cache lookup runs again because the counter is 0 (scheduler.py:811), so some blocks may be recovered without recomputing.
+Rejected speculative tokens: -= num_rejected, because the count was advanced for draft tokens that turned out wrong (scheduler.py:1844-1846).
+Invalid or failed KV blocks: truncated to the first bad block, idx * block_size (scheduler.py:2908).
+Full remote hit on the whole prompt: set to num_tokens - 1, so the last token is recomputed to produce logits to sample from (scheduler.py:2761-2762).
+
+# 4. Why detokenisation is incremental, and why a token can produce no text
+Where it happens: not in the engine core. The core sends only token ids. The frontend's OutputProcessor.process_outputs calls detokenizer.update(...) (output_processor.py:669), which calls decode_next once per token (detokenizer.py:118-120).
+
+Why incremental:
+
+Streaming needs the new text after every token.
+Decoding the whole output each step would cost more and more as the output grows.
+Decoding each token alone and joining the strings is wrong, because the text of a token depends on its neighbours (leading spaces, and characters split across tokens).
+So the detokenizer keeps a small window. In the slow path (detokenizer_utils.py:241-268) it decodes the window without the new token (prefix_text) and with it (new_text), and emits only the difference. The fast path does the same job with the tokenizers library's DecodeStream.
+
+Why one token id can give no text:
+
+Incomplete UTF-8 character (the main one). In byte-level BPE a token is a run of bytes, not characters. Urdu "ا" is two bytes (D8 A7) and 😀 is four (F0 9F 98 80). If the model emits only the first part, decoding gives "�". The code detects this and returns "" without moving its offsets (detokenizer_utils.py:260-265), so the next token is decoded together with the held one. The fast path returns None, turned into "" at detokenizer.py:222.
+Special tokens such as EOS, when skip_special_tokens is on.
+Stop strings. The last max(len(stop)) - 1 characters are held back in case they are the start of a stop string (detokenizer.py:85-90, detokenizer.py:149-165). The text exists but is not released yet.
+Out-of-vocabulary id: decoded as "" (detokenizer_utils.py:218-231).
