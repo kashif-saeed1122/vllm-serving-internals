@@ -137,6 +137,140 @@ _create_chat_completion -> render_chat_request -> in here it says it returns con
 It returns the type of AsyncGenerator, the router wraps that generator in StreamingResponse(content=generator, media_type="text/event-stream") — Starlette iterates the generator lazily and writes each yielded string to the response as it's produced, rather than waiting for the whole thing and sending it in one shot.
 
 
+# Week 5, Wednesday: text becomes an engine request
+
+**One sentence to remember:** text is tokenised in the frontend process, and
+only token IDs cross to the engine, packed in an `EngineCoreRequest` and sent
+as msgpack bytes over ZMQ.
+
+Line numbers are from commit 2cf0a69 and will drift. Function names are the
+stable anchors.
+
+## Q1. What object is sent to the engine, and which fields matter most?
+
+**Answer:** `EngineCoreRequest`, a `msgspec.Struct`.
+
+- Defined in `vllm/v1/engine/__init__.py` (class `EngineCoreRequest`, line 100).
+- Built in `InputProcessor.process_inputs` (`input_processor.py`, line 384).
+- 21 fields. 15 are set when it is built; 6 have defaults and are filled later.
+
+**The five that matter most, and why:**
+
+| Field | Why the engine needs it |
+|---|---|
+| `request_id` | Routes outputs back to the right caller |
+| `prompt_token_ids` | The actual input. There is no text field at all |
+| `sampling_params` | How to generate and when to stop (`max_tokens`, temperature) |
+| `arrival_time` | Start of the TTFT and end-to-end metrics |
+| `priority` | Queue order under priority scheduling, with `arrival_time` as tie-break |
+
+**Fields filled in later (same object, mutated along the way):**
+
+- `external_req_id`: `assign_request_id`, called from `AsyncLLM.add_request`
+- `reasoning_ended`, `reasoning_parser_kwargs`: `AsyncLLM.add_request`
+- `client_index`: `AsyncMPClient.add_request_async`, just before sending
+- `current_wave`: data-parallel client only
+- `abort_immediately`: a special reject path in `async_llm.py` that builds its
+  own request
+
+**My mistake:** I treated the definition and the construction as two different
+objects, and I ranked `cache_salt` and `session_id` above the payload.
+
+**Note:** tokenisation is no longer in `input_processor.py` on the normal path.
+It happens earlier in the Renderer (`tokenize_prompts` in
+`vllm/renderers/base.py`). `InputProcessor` now mostly validates and packages.
+
+## Q2. What transport carries the request to the engine process?
+
+**Answer:** ZMQ (ZeroMQ) moves the bytes. msgspec (msgpack format) turns the
+object into bytes and back. These are two separate jobs.
+
+**The path:**
+
+1. `AsyncLLM._add_request` calls `engine_core.add_request_async(request)`
+2. `AsyncMPClient._send_input` encodes it with `MsgpackEncoder`
+3. `input_socket.send_multipart(...)` sends `(engine_id, request_type, *frames)`,
+   where the type for a new request is `ADD = b"\x00"`
+4. Process boundary
+5. `EngineCoreProc.process_input_sockets` (an IO thread) decodes it with
+   `MsgpackDecoder(EngineCoreRequest)`
+6. `preprocess_add_request` converts it to a `Request`
+7. It goes onto `input_queue` for the busy loop
+
+**Sockets:** requests go frontend `ROUTER` to engine `DEALER`. Outputs come
+back on a separate pair, engine `PUSH` to frontend `PULL`.
+
+**Why a separate process:** the GIL. The frontend does HTTP, tokenising,
+detokenising and JSON. The engine runs the scheduling and model loop. In one
+process, each would block the other.
+
+**Exception:** `InprocClient` calls the engine directly, with no process and
+no ZMQ. `EngineCoreClient.make_client` chooses which client to use.
+
+**My mistake:** I said msgspec "validates" the request. Its main job is
+serialising. Typed decoding does reject bad data, but that is a side effect.
+
+## Q3. Where is the server-side arrival time recorded?
+
+**Answer:** in the Renderer, not in `add_request`.
+
+- Recorded: `arrival_time = time.time()` at the top of `render_cmpl` and
+  `render_chat` (`vllm/renderers/base.py`, lines 993 and 1044), before
+  templating and tokenisation.
+- Carried: stored as `engine_input["arrival_time"]` in `process_for_engine`.
+- Read: `process_inputs` picks it up with `prompt.get("arrival_time", ...)`
+  and copies it into `EngineCoreRequest.arrival_time`.
+
+**Traps:**
+
+- `AsyncLLM.add_request` only forwards a parameter. On the normal path it is
+  `None`, because `generate()` never passes `arrival_time`.
+- The two `time.time()` calls inside `process_inputs` (lines 292 and 303) are
+  fallbacks. Line 303 is in the deprecated raw-prompt branch.
+
+**TTFT link:**
+
+- vLLM's TTFT metric = first token processed in the frontend minus
+  `arrival_time` (`vllm/v1/metrics/stats.py`, line 393).
+- My client-side TTFT = (gap from client `st` to server `arrival_time`) +
+  vLLM's TTFT + the response travelling back.
+- That first gap is network plus HTTP parsing and validation. vLLM's own
+  metric cannot see it.
+
+**My mistake:** I searched for the name `arrival_time` and stopped at the
+first place it appeared. I should have searched for where the value is
+created.
+
+## Diagram
+
+```
+[1 API server + Renderer]
+      |  EngineInput (dict: prompt_token_ids, arrival_time, ...)
+      v
+[2 AsyncLLM + InputProcessor]
+      |  EngineCoreRequest (msgpack bytes over ZMQ)
+      v
+[3 EngineCore process]  ->  Request (for the scheduler)
+```
+
+## Self-test (cover the answers above)
+
+1. Does the engine process ever see the prompt text? Why not?
+2. Which library moves the bytes, and which one makes the bytes?
+3. `add_request` has an `arrival_time` parameter. What is its value on a
+   normal chat request, and where does the real value come from?
+4. Name two fields that are not set in `process_inputs`, and where they are set.
+5. What is included in my client TTFT that vLLM's TTFT metric leaves out?
+
+## Reading habits to keep
+
+- Trace the value, not the name: find where it is written, not where it is
+  mentioned.
+- For any object, find four places: defined, constructed, modified, sent.
+- Rank a field by who reads it on the other side.
+- A deprecation warning marks the old path. Follow the other one.
+
+
 ### Thursday read code repo
 # 1. step() does three things in order
 Answer (core.py:583-613):
