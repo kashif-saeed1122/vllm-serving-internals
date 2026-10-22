@@ -335,9 +335,69 @@ Decoding the whole output each step would cost more and more as the output grows
 Decoding each token alone and joining the strings is wrong, because the text of a token depends on its neighbours (leading spaces, and characters split across tokens).
 So the detokenizer keeps a small window. In the slow path (detokenizer_utils.py:241-268) it decodes the window without the new token (prefix_text) and with it (new_text), and emits only the difference. The fast path does the same job with the tokenizers library's DecodeStream.
 
-Why one token id can give no text:
+## Saturday: TTFT caveat, resolved (by reading the code; curl proof still open)
 
-Incomplete UTF-8 character (the main one). In byte-level BPE a token is a run of bytes, not characters. Urdu "ا" is two bytes (D8 A7) and 😀 is four (F0 9F 98 80). If the model emits only the first part, decoding gives "�". The code detects this and returns "" without moving its offsets (detokenizer_utils.py:260-265), so the next token is decoded together with the held one. The fast path returns None, turned into "" at detokenizer.py:222.
-Special tokens such as EOS, when skip_special_tokens is on.
-Stop strings. The last max(len(stop)) - 1 characters are held back in case they are the start of a stop string (detokenizer.py:85-90, detokenizer.py:149-165). The text exists but is not released yet.
-Out-of-vocabulary id: decoded as "" (detokenizer_utils.py:218-231).
+**The question:** the chat stream's first chunk has no text. Is it sent
+*before* the model computes the first token, or *after*?
+
+**The worry from Week 2:** my benchmark stops the TTFT stopwatch at the first
+chunk that has `choices`. If that empty chunk went out early, my TTFT would
+mean "time until the server said hello", not "time until the first token".
+
+**One rule to remember:**
+> **No token → no output → no chunk.**
+> The empty "role" chunk can only travel *with* the first token, never before it.
+
+### The ideas, in plain words
+
+- **SSE chunk:** one `data: {...}\n\n` message in the stream. Each one carries
+  a `delta` (only what's new).
+- **Role chunk:** the very first chunk. It says who is speaking and has no text:
+  `{"delta": {"role": "assistant", "content": ""}}`.
+- **Mailbox:** every request has a `RequestOutputCollector`. The streaming
+  function can't send anything until something is put in this mailbox.
+- **Waiter analogy:** the waiter only comes to the table with the first dish
+  in hand. He says "here you go" (the role chunk) and puts it down (token 1).
+
+### The evidence: four doors, each opens only after the one before
+
+    engine samples token 1
+      │  door 1: engine sends output only if there's a token
+      ▼
+    EngineCoreOutput ──ZMQ──► frontend
+      │  door 2: output processor puts a RequestOutput in the mailbox
+      ▼
+    mailbox (RequestOutputCollector)
+      │  door 3: generate() waits on the mailbox, then yields
+      ▼
+    async for res ... → if first_iteration → role chunk, then token 1's text
+      │  door 4: client stamps TTFT on the first chunk with "choices"
+      ▼
+    ttft = perf_counter() - st
+
+1. **Engine:** `scheduler.py:1961`, `update_from_output`:
+   `should_emit_output = bool(new_token_ids or pooler_output is not None or stopped)`.
+   A prefill step with no token sends nothing, even a chunked 6144-token prompt.
+2. **Output processor:** `output_processor.py:694`, `process_outputs`:
+   `req_state.queue.put(request_output)` is the only thing that fills the mailbox.
+3. **Frontend generator:** `async_llm.py:607`, `generate`:
+   `out = q.get_nowait() or await q.get()`. It waits until the mailbox has something.
+4. **Stream function:** `serving.py:497`, `chat_completion_stream_generator`:
+   `async for res in result_generator:`. The role chunk is built at line 523,
+   **inside** `if first_iteration:` (line 507), **inside** the loop. The loop
+   can't run before door 3 opens.
+5. **Client:** `endpoint_request_func.py`, `if choices := data.get("choices")`.
+   It stops on the role chunk. That's fine, because the role chunk already
+   needed token 1 to exist.
+
+### What this means for my Week 2 numbers
+
+- ✅ **TTFT is valid.** It measures the real first token, not a "hello".
+- ⚠ **Side effect on ITL:** the role chunk and token 1's text come from the
+  **same** `res` and are sent back to back. So every request's **first ITL
+  sample is about 0 ms**, which pulls mean ITL down a little.
+
+### Still open
+- Proof by measurement: on the next pod session, run `curl -N` with
+  `"stream": true` and timestamp each line. Expect the role chunk and the first
+  content chunk to arrive almost together.
