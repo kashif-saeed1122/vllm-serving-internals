@@ -1,3 +1,12 @@
+# Papers link (Read throughout this month)
+
+## Month 1
+- PagedAttention (Kwon et al., SOSP '23): https://arxiv.org/abs/2309.06180
+- Orca (Yu et al., OSDI '22): https://www.usenix.org/conference/osdi22/presentation/yu
+
+## Month 2
+- SARATHI-Serve (chunked prefills): https://arxiv.org/abs/2403.02310
+
 # Inference engine explanation in simple words
 
 https://www.youtube.com/watch?v=hBzUokVYQkI
