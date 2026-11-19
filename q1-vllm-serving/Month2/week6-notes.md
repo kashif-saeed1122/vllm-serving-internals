@@ -236,3 +236,124 @@ but here it is a token limit.
 
 *Caveat: "at once" means the client sends all 20 together, but they reach the engine a few ms apart. If step 1
 starts before all 20 have arrived, the staircase shifts.*
+
+# Week 6 · Wednesday: the running loop and preemption
+
+Files: `vllm/v1/core/sched/scheduler.py` (`schedule()` L691, running loop L767–972, `_preempt_request` L1820).
+Line numbers can drift between versions.
+
+## One sentence
+Running requests are served first. If one can't get KV blocks, the scheduler kicks out another running
+request (the victim), frees its blocks, and retries. The victim recomputes from zero later.
+
+## Two limits (do not mix them up)
+| | token_budget | KV blocks |
+|---|---|---|
+| What | compute allowed this step | memory (fixed pool, sized from VRAM at startup) |
+| Resets | every step | held until the request finishes or is preempted |
+| When short | request just gets **fewer tokens** (`min`, L820) | `allocate_slots` returns `None` -> **victim** |
+
+Only memory failure causes preemption. A spent budget never does (the loop just ends, L769).
+
+## Why running before waiting (Q1)
+- Running requests hold blocks and computed progress. Waiting ones hold nothing.
+- Decode is cheap (about 1 token) and users watch the stream. Waiting only delays the first token.
+- The waiting pass gets the leftover budget.
+- Waiting-first would thrash: admit, prefill, evict, recompute.
+- L1030: if anything was preempted this step, the waiting pass is skipped.
+- A waiting request never preempts. On `None` it just `break`s (L1504).
+
+## The call that decides (Q2)
+`self.kv_cache_manager.allocate_slots(request, num_new_tokens, ...)` at L888.
+- Returns the new blocks, or `None` if blocks needed > free blocks (`kv_cache_manager.py` L604–608).
+- Needs a new block only when the next token crosses a block boundary.
+  `needed = ceil((computed + new) / block_size) - blocks_held`
+- Watermark headroom applies only to WAITING/PREEMPTED requests, not running ones.
+
+## Preemption path: ask, pick, remove, reset, retry
+1. **Ask:** `allocate_slots` returns `None` (blocks needed > free).
+2. **Pick victim (L906–912):**
+   - FCFS: `running[-1]`, the newest admitted.
+   - PRIORITY: `max(running, key=(priority, arrival_time))`. Largest number = least important.
+3. **Remove from `self.running`:** done by the loop, not by `_preempt_request`.
+   - FCFS: `pop()` (L948).
+   - PRIORITY: `index` + `del`, then `if victim_index < req_index: req_index -= 1` (L919–922).
+   - PRIORITY only: if the victim was already scheduled this step, refund it (L924–946).
+4. **Reset (`_preempt_request`, L1820):**
+   - free KV blocks (maybe deferred if a GPU step may still write them)
+   - free encoder cache
+   - `status = PREEMPTED`
+   - `num_computed_tokens = 0` (keeps prompt and output tokens)
+   - `num_preemptions += 1`
+   - `waiting.prepend_request`: front under FCFS; re-inserted by (priority, arrival) under PRIORITY
+5. **Retry:** back to `while True` (L887) with the same request.
+   - Success: `break` (L896), schedule it.
+   - Give up: L902 pending frees, L916 victim can't be freed, L958 victim is the request itself.
+   - Then FCFS outer `break` (L972); PRIORITY self-preempt `continue` (L970).
+
+## Q3: why evict a running request at all
+Memory is oversubscribed because admission is optimistic (only the next chunk is checked).
+Without eviction: every request holds blocks and waits for one more, so nobody finishes. Deadlock.
+Evicting one victim breaks the circle.
+
+## Q4: what the victim loses
+| | before | after |
+|---|---|---|
+| blocks | held | returned to pool |
+| status | RUNNING | PREEMPTED |
+| num_computed_tokens | e.g. 12 | **0** |
+| num_tokens | 13 | 13 (unchanged) |
+| queue | running | waiting |
+
+V1 does **recompute**, not swap: nothing is copied to CPU. Freed blocks stay in the prefix cache
+until reused, so a re-admitted victim may recompute less than all of it.
+
+## Q5: refund (PRIORITY only)
+If the victim was already planned this step, undo the plan. Each spend has a mirror:
+| spent at | undone at |
+|---|---|
+| L975 add to scheduled_running_reqs | L926 remove |
+| L979 num_scheduled_tokens[id] | L927 pop -> `restored` |
+| L980 token_budget -= n | L928 += restored |
+| L981 input_budget -= n + draft_slots | L929 += restored + draft_slots |
+| L978 req_to_new_blocks[id] | L930 pop |
+| L999 spec tokens, L1007 encoder inputs | L931, L932, L942 |
+- Refund reads `restored` from the dict: that is the exact amount spent, already capped.
+- `req_to_new_blocks` entry must go: it tells the worker which blocks A owns; they were just freed.
+- `num_computed_tokens` is not rolled back here because it is only advanced later in
+  `_update_after_schedule`.
+- FCFS never refunds: the victim is `running[-1]`, which is never an already-scheduled request.
+- `drafts_needed` and `prefill_scheduled` are never undone.
+
+## FCFS vs PRIORITY
+One policy per engine, set at startup (`policy = "fcfs"` is the default). In FCFS, `request.priority` is ignored.
+Lower priority number = more important.
+
+## Loops and breaks in the running pass
+- OUTER `while req_index < len(running) and token_budget > 0` (L769).
+  - `break`: L772, L972.
+  - `continue`: skips (each does `req_index += 1` first); L970 is the PRIORITY self-preempt.
+- INNER `while True` (L887). Its four breaks only escape the retry loop:
+  L896 success; L902, L916, L958 failure.
+- After the inner loop, L960 `if new_blocks is None` decides continue (L970) or break (L972).
+- The waiting pass has ONE loop (L1059), nothing nested.
+- A `break` or `continue` belongs to the nearest enclosing `while` or `for`.
+
+## A vs B exits (running loop)
+- A: this request gets nothing, try the next (`req_index += 1; continue`).
+- B: stop the whole running loop; nobody after is considered.
+- Both leave the request in `running` with its blocks. Neither is preemption.
+- Exception: L958 under FCFS. The request preempted itself, then B-exit at L972.
+
+## Traps
+- Budget low means fewer tokens, not a victim.
+- `_preempt_request` does not remove from `running`. The caller does.
+- New requests never evict running ones.
+- Prefix cache is not separate memory. It is the same block pool, reused by hash.
+
+## Self-test (answer with the file closed)
+1. What does `allocate_slots` return on failure?
+2. Who is the FCFS victim? The PRIORITY victim?
+3. Which of blocks, status, `num_computed_tokens` change on the victim?
+4. Why does the PRIORITY branch decrement `req_index`?
+5. When is the refund block skipped?
